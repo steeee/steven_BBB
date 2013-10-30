@@ -5,6 +5,8 @@
  *
  *      This program is provided with the V4L2 API
  * see http://linuxtv.org/docs.php for more information
+ *
+ * 2013/10/30 Steven Chiu integraded with OpenCV to show aw data of Y channel
  */
 
 #include <stdio.h>
@@ -24,8 +26,13 @@
 #include <sys/ioctl.h>
 
 #include <linux/videodev2.h>
+#include <opencv2/opencv.hpp>
 
+#define USE_OPENCV
 #define CLEAR(x) memset(&(x), 0, sizeof(x))
+
+using namespace std;
+using namespace cv;
 
 enum io_method {
         IO_METHOD_READ,
@@ -38,14 +45,15 @@ struct buffer {
         size_t  length;
 };
 
-static char            *dev_name;
+static const char      *dev_name;
 static enum io_method   io = IO_METHOD_MMAP;
 static int              fd = -1;
 struct buffer          *buffers;
 static unsigned int     n_buffers;
 static int              out_buf;
-static int              force_format;
-static int              frame_count = 70;
+static int              force_format = 1; /* force use 640 x 480 YUYV format */
+static int              total_frame_count = -1; /* default to infinity frames */
+static int              current_frame_count = 0;
 
 static void errno_exit(const char *s)
 {
@@ -66,13 +74,33 @@ static int xioctl(int fh, int request, void *arg)
 
 static void process_image(const void *p, int size)
 {
+
+	printf("image size is %d\n", size);
+	printf("frame count(current %d, total %d)\n"
+		, current_frame_count, total_frame_count);
+
+#if defined(USE_OPENCV)
+
+	vector<Mat> vectorMatLeft;
+	IplImage* frame;
+	frame = cvCreateImage(cvSize(640, 480), IPL_DEPTH_8U, 2);
+	frame->imageData = (char*)p;
+
+	Mat cvmat(frame);
+	split(cvmat, vectorMatLeft);
+	imshow("Y Raw", vectorMatLeft[0]);
+
+	cvWaitKey(1);
+#else
         if (out_buf)
                 fwrite(p, size, 1, stdout);
 
         fflush(stderr);
         fprintf(stderr, ".");
         fflush(stdout);
+#endif
 }
+
 
 static int read_frame(void)
 {
@@ -168,11 +196,10 @@ static int read_frame(void)
 
 static void mainloop(void)
 {
-        unsigned int count;
 
-        count = frame_count;
+        current_frame_count = total_frame_count;
 
-        while (count-- > 0) {
+        while (total_frame_count == -1 || current_frame_count-- > 0) {
                 for (;;) {
                         fd_set fds;
                         struct timeval tv;
@@ -297,7 +324,7 @@ static void uninit_device(void)
 
 static void init_read(unsigned int buffer_size)
 {
-        buffers = calloc(1, sizeof(*buffers));
+        buffers = (struct buffer *) calloc(1, sizeof(*buffers));
 
         if (!buffers) {
                 fprintf(stderr, "Out of memory\n");
@@ -339,7 +366,7 @@ static void init_mmap(void)
                 exit(EXIT_FAILURE);
         }
 
-        buffers = calloc(req.count, sizeof(*buffers));
+        buffers = (struct buffer *) calloc(req.count, sizeof(*buffers));
 
         if (!buffers) {
                 fprintf(stderr, "Out of memory\n");
@@ -391,7 +418,7 @@ static void init_userp(unsigned int buffer_size)
                 }
         }
 
-        buffers = calloc(4, sizeof(*buffers));
+        buffers = (struct buffer *) calloc(4, sizeof(*buffers));
 
         if (!buffers) {
                 fprintf(stderr, "Out of memory\n");
@@ -564,11 +591,12 @@ static void usage(FILE *fp, int argc, char **argv)
                  "-m | --mmap          Use memory mapped buffers [default]\n"
                  "-r | --read          Use read() calls\n"
                  "-u | --userp         Use application allocated buffers\n"
-                 "-o | --output        Outputs stream to stdout\n"
+                 "-o | --output        Outputs stream to stdout (deprecate)\n"
                  "-f | --format        Force format to 640x480 YUYV\n"
-                 "-c | --count         Number of frames to grab [%i]\n"
-                 "",
-                 argv[0], dev_name, frame_count);
+                 "-c | --count         Num of frames to grab, -1 for inf.[%i]\n"
+                 "\n"
+                 "default: capture -f -c -1\n",
+                 argv[0], dev_name, total_frame_count);
 }
 
 static const char short_options[] = "d:hmruofc:";
@@ -634,7 +662,7 @@ int main(int argc, char **argv)
 
                 case 'c':
                         errno = 0;
-                        frame_count = strtol(optarg, NULL, 0);
+                        total_frame_count = strtol(optarg, NULL, 0);
                         if (errno)
                                 errno_exit(optarg);
                         break;
